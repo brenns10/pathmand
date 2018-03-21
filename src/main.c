@@ -127,6 +127,10 @@ static int pathmand_init(struct pathmand *pm)
 		goto err_return;
 	}
 
+	/* disable sequence check in order to receive events (not just replies)
+	 */
+	nl_socket_disable_seq_check(pm->notify_sk);
+
 	pm->request_sk = nl_socket_alloc();
 	if (!pm->request_sk) {
 		fprintf(stderr, "error allocating netlink request socket\n");
@@ -138,6 +142,13 @@ static int pathmand_init(struct pathmand *pm)
 		nl_perror(rc, "genl_connect(request_sk)");
 		goto err_cleanup_notify_sk;
 	}
+
+	/* need to resolve the family name to ID */
+	rc = genl_ops_resolve(pm->notify_sk, &mptcp_family);
+	if (rc != 0) {
+		nl_perror(rc, "genl_ops_resolve");
+	}
+	printf("genl family: %x\n", mptcp_family.o_id);
 
 	/* register genl family so genl_handle_msg will call us */
 	rc = genl_register_family(&mptcp_family);
@@ -162,6 +173,8 @@ static int pathmand_init(struct pathmand *pm)
 			nl_perror(group, mptcp_groups[i]);
 			goto err_cleanup_request_sk;
 		}
+		printf("resolve %s.%s = %d\n", mptcp_family.o_name,
+			mptcp_groups[i], group);
 
 		rc = nl_socket_add_memberships(
 			pm->notify_sk, group, NFNLGRP_NONE);
@@ -186,8 +199,12 @@ err_return:
  */
 static void pathmand_run(struct pathmand *pm)
 {
+	int rc;
+
 	for (;;) {
-		nl_recvmsgs_default(pm->notify_sk);
+		rc = nl_recvmsgs_default(pm->notify_sk);
+		if (rc < 0)
+			nl_perror(rc, "nl_recvmsgs_default");
 	}
 }
 
