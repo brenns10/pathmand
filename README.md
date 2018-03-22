@@ -9,16 +9,17 @@ Functionality
 -------------
 
 Currently, pathmand registers a set of callbacks for a hypothetical Netlink API
-which should be close to the final version, and then loops waiting for messages.
-When it receives a callback, it logs it to stdout.
+which should be close to the final version. It also loads the path manager
+plugins specified on the command line. Currently, it only uses the first plugin
+specified. It calls the path manager for each event it receives from the kernel.
 
-Expected future functionality:
-- A plugin API roughly corresponding to the Netlink API
-  * this API should allow path managers to create state for each connection
-- Dynamically loading path manager plugins according to the plugin API
-- Policy for matching new connections with the correct path manager
-- State for tracking which path manager corresponds to which connection ID,
-  along with the path manager's state.
+In the future, pathmand should support:
+- A more finalized Netlink API
+- Support for calling kernel Netlink actions
+- Policy for choosing from multiple path managers and mapping each connection to
+  the chosen path manager
+- Listening for new IP address events
+
 
 Building
 --------
@@ -31,6 +32,22 @@ Requires libnl-3.0, and libng-genl-3.0, and also the pkg-config tool:
 Running
 -------
 
-You need a corresponding Generic Netlink protocol in your kernel in order to run
-this. I don't have a dummy protocol implemented yet, so there is no way to get
-this to run.
+The included patch [dummy-path-manager.patch](dummy-path-manager.patch) applies
+on top of `mptcp_trunk` or `mptcp_v0.94`. Patch, configure this path manager as
+default, and boot the MPTCP kernel, and then you can run this path manager as
+follows:
+
+    $ ./main echo
+    init echo.c path manager
+    resolve family mptcp = 0x1c
+    resolve group mptcp.new_connection = 0xa
+    resolve group mptcp.new_addr = 0xb
+    resolve group mptcp.join_attempt = 0xc
+    resolve group mptcp.new_subflow = 0xd
+    resolve group mptcp.subflow_closed = 0xe
+    resolve group mptcp.conn_closed = 0xf
+
+Which specifies the "echo" path manager. You can see sample output by running on
+a separate terminal:
+
+    curl http://multipath-tcp.org
