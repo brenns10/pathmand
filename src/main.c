@@ -32,7 +32,7 @@ struct path_manager {
 struct pathmand {
 	struct nl_sock *notify_sk;
 	struct nl_sock *request_sk;
-	struct path_manager *pms[MAX_PMS];
+	struct path_manager pms[MAX_PMS];
 	unsigned int n_pms;
 };
 
@@ -128,7 +128,7 @@ static void pathmand_destroy_pms(struct pathmand *pm)
 	struct path_manager *mgr;
 
 	for (; pm->n_pms; pm->n_pms--) {
-		mgr = pm->pms[pm->n_pms - 1];
+		mgr = &pm->pms[pm->n_pms - 1];
 
 		mgr->new_connection = NULL;
 		mgr->new_addr = NULL;
@@ -138,8 +138,6 @@ static void pathmand_destroy_pms(struct pathmand *pm)
 		mgr->conn_closed = NULL;
 
 		dlclose(mgr->handle);
-		free(mgr);
-		pm->pms[pm->n_pms - 1] = NULL;
 	}
 }
 
@@ -158,6 +156,14 @@ static int pathmand_init_pms(struct pathmand *pm, int argc, char **argv)
 	struct path_manager *mgr;
 	pm->n_pms = 0;
 
+	/* In the final implementation, we'll likely populate:
+	 *
+	 * 1. A linked list of path_manager structs
+	 * 2. A hash table mapping connection IDs to their path managers
+	 *
+	 * (instead of this simple static array)
+	 */
+
 	if (argc - 1 > MAX_PMS) {
 		fprintf(stderr, "error: too many path managers\n");
 		return -1;
@@ -171,20 +177,16 @@ static int pathmand_init_pms(struct pathmand *pm, int argc, char **argv)
 			goto cleanup;
 		}
 
-		mgr = malloc(sizeof(*mgr));
-		if (!mgr) {
-			fprintf(stderr, "allocation error\n");
-			goto cleanup;
-		}
-
-		pm->pms[pm->n_pms++] = mgr;
+		mgr = &pm->pms[pm->n_pms + 1];
 		strncpy(mgr->name, *argv, sizeof(mgr->name));
 
 		mgr->handle = dlopen(buf, RTLD_NOW);
 		if (!mgr->handle) {
 			fprintf(stderr, "dlopen: %s\n", dlerror());
-			goto free_then_cleanup;
+			goto cleanup;
 		}
+
+		pm->n_pms += 1;
 
 		/* let's not have repetitive code */
 		#define INIT_FUNC(func) do { \
@@ -211,9 +213,6 @@ static int pathmand_init_pms(struct pathmand *pm, int argc, char **argv)
 	return 0;
 close_then_cleanup:
 	dlclose(mgr->handle);
-free_then_cleanup:
-	free(mgr);
-	pm->n_pms--;
 cleanup:
 	pathmand_destroy_pms(pm);
 	return -1;
