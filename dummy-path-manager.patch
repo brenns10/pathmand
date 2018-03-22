@@ -1,0 +1,317 @@
+From a7a458c75019244d0da1365c8cf4791621e06855 Mon Sep 17 00:00:00 2001
+From: Stephen Brennan <stephen@brennan.io>
+Date: Thu, 22 Mar 2018 11:32:49 -0700
+Subject: [PATCH] Dummy Netlink API path manager
+
+---
+ net/mptcp/Kconfig         |  14 ++-
+ net/mptcp/Makefile        |   3 +
+ net/mptcp/mptcp_netlink.c | 229 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 244 insertions(+), 2 deletions(-)
+ create mode 100644 net/mptcp/mptcp_netlink.c
+
+diff --git a/net/mptcp/Kconfig b/net/mptcp/Kconfig
+index 13cf4d51ce1f..1f504cfdf0bb 100644
+--- a/net/mptcp/Kconfig
++++ b/net/mptcp/Kconfig
+@@ -31,6 +31,12 @@ config MPTCP_NDIFFPORTS
+ 	  pair of IP-addresses, modifying the source-port. You can set the number
+ 	  of subflows via the mptcp_ndiffports-sysctl.
+ 
++config MPTCP_NETLINK
++	tristate "MPTCP Netlink Path Manager"
++	depends on MPTCP=y
++	---help---
++	  This path-management module communicates with userspace for path
++	  management operations.
+ config MPTCP_BINDER
+ 	tristate "MPTCP Binder"
+ 	depends on (MPTCP=y)
+@@ -41,7 +47,7 @@ config MPTCP_BINDER
+ 
+ choice
+ 	prompt "Default MPTCP Path-Manager"
+-	default DEFAULT
++	default DEFAULT_DUMMY
+ 	help
+ 	  Select the Path-Manager of your choice
+ 
+@@ -57,6 +63,9 @@ choice
+ 	config DEFAULT_DUMMY
+ 		bool "Default"
+ 
++	config DEFAULT_NETLINK
++		bool "netlink" if MPTCP_NETLINK=y
++
+ endchoice
+ 
+ endif
+@@ -67,6 +76,7 @@ config DEFAULT_MPTCP_PM
+ 	default "fullmesh" if DEFAULT_FULLMESH 
+ 	default "ndiffports" if DEFAULT_NDIFFPORTS
+ 	default "binder" if DEFAULT_BINDER
++	default "netlink" if DEFAULT_NETLINK
+ 	default "default"
+ 
+ menuconfig MPTCP_SCHED_ADVANCED
+@@ -94,7 +104,7 @@ config MPTCP_REDUNDANT
+ 
+ choice
+ 	prompt "Default MPTCP Scheduler"
+-	default DEFAULT
++	default DEFAULT_SCHEDULER
+ 	help
+ 	  Select the Scheduler of your choice
+ 
+diff --git a/net/mptcp/Makefile b/net/mptcp/Makefile
+index a38e43768eb3..f029cff0b107 100644
+--- a/net/mptcp/Makefile
++++ b/net/mptcp/Makefile
+@@ -17,6 +17,9 @@ obj-$(CONFIG_MPTCP_NDIFFPORTS) += mptcp_ndiffports.o
+ obj-$(CONFIG_MPTCP_BINDER) += mptcp_binder.o
+ obj-$(CONFIG_MPTCP_ROUNDROBIN) += mptcp_rr.o
+ obj-$(CONFIG_MPTCP_REDUNDANT) += mptcp_redundant.o
++obj-$(CONFIG_MPTCP_NETLINK) += mptcp_netlink.o
++
++CFLAGS_mptcp_netlink.o := -DDEBUG
+ 
+ mptcp-$(subst m,y,$(CONFIG_IPV6)) += mptcp_ipv6.o
+ 
+diff --git a/net/mptcp/mptcp_netlink.c b/net/mptcp/mptcp_netlink.c
+new file mode 100644
+index 000000000000..ad3c90530253
+--- /dev/null
++++ b/net/mptcp/mptcp_netlink.c
+@@ -0,0 +1,229 @@
++/* MPTCP Netlink Path Manager API (dummy)
++ *
++ * Exists just for testing userspace path manager daemon.
++ *
++ * Stephen Brennan <stephen@brennan.io>
++ */
++#include <linux/module.h>
++#include <linux/in.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
++
++#include <net/mptcp.h>
++#include <net/mptcp_v4.h>
++#include <net/genetlink.h>
++
++/* MPTCP Generic Netlink Family - constants declarations
++ */
++
++enum {
++	MPTCP_A_UNSPEC,
++	MPTCP_A_CONNECTION_ID,
++	MPTCP_A_SUBFLOW_ID,
++	MPTCP_A_ADDRESS_ID,
++	MPTCP_A_LOCAL_ADDRESS,
++	MPTCP_A_LOCAL_PORT,
++	MPTCP_A_REMOTE_ADDRESS,
++	MPTCP_A_REMOTE_PORT,
++	MPTCP_A_BACKUP,
++	__MPTCP_A_MAX,
++};
++
++#define MPTCP_A_MAX (__MPTCP_A_MAX - 1)
++
++static struct nla_policy mptcp_genl_policy[MPTCP_A_MAX + 1] = {
++	[MPTCP_A_CONNECTION_ID] = { .type = NLA_U32 }, /* TODO verify */
++	[MPTCP_A_SUBFLOW_ID] = { .type = NLA_U32 },    /* TODO verify */
++	[MPTCP_A_ADDRESS_ID] = { .type = NLA_U32 },    /* TODO verify */
++	[MPTCP_A_LOCAL_ADDRESS] = { .type = NLA_UNSPEC, .len = 4 },
++	[MPTCP_A_LOCAL_PORT] = { .type = NLA_U16 },
++	[MPTCP_A_REMOTE_ADDRESS] = { .type = NLA_UNSPEC, .len = 4 },
++	[MPTCP_A_REMOTE_PORT] = { .type = NLA_U16 },
++	[MPTCP_A_BACKUP] = { .type = NLA_FLAG },
++};
++
++enum {
++	MPTCP_C_SEND_ADDR,
++	MPTCP_C_ADD_SUBFLOW,
++	MPTCP_C_ALLOW_JOIN,     /* TODO change this */
++	MPTCP_C_SET_BACKUP,
++	MPTCP_C_REMOVE_SUBFLOW,
++	MPTCP_C_NEW_CONNECTION, /* sent by kernel */
++	MPTCP_C_NEW_ADDR,       /* sent by kernel */
++	MPTCP_C_JOIN_ATTEMPT,   /* sent by kernel */
++	MPTCP_C_NEW_SUBFLOW,    /* sent by kernel */
++	MPTCP_C_SUBFLOW_CLOSED, /* sent by kernel */
++	MPTCP_C_CONN_CLOSED,    /* sent by kernel */
++	__MPTCP_C_MAX,
++};
++
++#define MPTCP_C_MAX (__MPTCP_C_MAX - 1)
++
++static struct genl_ops mptcp_genl_ops[] = {
++};
++
++static struct genl_multicast_group mptcp_genl_group[] = {
++	{ .name = "new_connection" },
++	{ .name = "new_addr" },
++	{ .name = "join_attempt" },
++	{ .name = "new_subflow" },
++	{ .name = "subflow_closed" },
++	{ .name = "conn_closed" },
++};
++
++static struct genl_family mptcp_genl_family = {
++	.hdrsize = 0,
++	.name = "mptcp",
++	.version = 1,
++	.maxattr = MPTCP_A_MAX,
++	.netnsok = true,
++	.ops = mptcp_genl_ops,
++	.n_ops = ARRAY_SIZE(mptcp_genl_ops),
++	.mcgrps = mptcp_genl_group,
++	.n_mcgrps = ARRAY_SIZE(mptcp_genl_group),
++};
++
++/* Send an event to userspace
++ */
++static void send_event(struct net *net, int event, char *group_name)
++{
++	void *head;
++	int i, group;
++	struct sk_buff *buf = genlmsg_new(NLMSG_GOODSIZE, GFP_ATOMIC);
++
++	if (!buf)
++		return;
++
++	head = genlmsg_put(buf, 0, 0, &mptcp_genl_family, 0, event);
++
++	if (!head)
++		goto failure;
++
++	genlmsg_end(buf, head);
++
++	group = 0;
++	for (i = 0; i < ARRAY_SIZE(mptcp_genl_group); i++) {
++		if (strcmp(group_name, mptcp_genl_group[i].name) == 0)
++			group = i;
++	}
++
++	genlmsg_multicast_netns(&mptcp_genl_family, net, buf, 0, group, 0);
++
++	// I don't think we need to free the sk_buff, as the network driver
++	// *should* do that for us.
++	return;
++failure:
++	kfree_skb(buf);
++}
++
++static void mptcp_new_session(const struct sock *meta_sk)
++{
++	/* nop */
++	pr_debug("mptcp_new_session\n");
++	send_event(sock_net(meta_sk), MPTCP_C_NEW_CONNECTION, "new_connection");
++}
++
++static void mptcp_fully_established(struct sock *meta_sk)
++{
++	pr_debug("mptcp_fully_established\n");
++}
++
++static void mptcp_new_remote_address(struct sock *meta_sk)
++{
++	/* new-addr */
++	pr_debug("mptcp_new_remote_address\n");
++	send_event(sock_net(meta_sk), MPTCP_C_NEW_ADDR, "new_addr");
++}
++
++
++static int mptcp_get_local_id(sa_family_t family, union inet_addr *addr,
++		struct net *net, bool *low_prio)
++{
++	pr_debug("mptcp_get_local_id\n");
++	return 0;
++}
++
++static void mptcp_add_raddr(struct mptcp_cb *mpcb, const union inet_addr *addr,
++		sa_family_t family, __be16 port, u8 id)
++{
++	pr_debug("mptcp_add_raddr\n");
++	send_event(sock_net(mpcb->meta_sk), MPTCP_C_NEW_ADDR, "new_addr");
++}
++
++static void mptcp_rem_raddr(struct mptcp_cb *mpcb, u8 rem_id)
++{
++	pr_debug("mptcp_rem_raddr\n");
++	/* no event for this :/ */
++}
++
++static void mptcp_init_subsocket_v4(struct sock *sk, struct in_addr addr)
++{
++	pr_debug("mptcp_init_subsocket_v4\n");
++	send_event(sock_net(sk), MPTCP_C_NEW_SUBFLOW, "new_subflow");
++}
++
++static void mptcp_init_subsocket_v6(struct sock *sk, struct in6_addr addr)
++{
++	pr_debug("mptcp_init_subsocket_v6\n");
++	send_event(sock_net(sk), MPTCP_C_NEW_SUBFLOW, "new_subflow");
++}
++
++static void mptcp_delete_subflow(struct sock *sk)
++{
++	pr_debug("mptcp_delete_subflow\n");
++	send_event(sock_net(sk), MPTCP_C_SUBFLOW_CLOSED, "subflow_closed");
++}
++
++static struct mptcp_pm_ops netlink __read_mostly = {
++	.new_session = mptcp_new_session,
++	.fully_established = mptcp_fully_established,
++	.new_remote_address = mptcp_new_remote_address,
++	.get_local_id = mptcp_get_local_id,
++	.add_raddr = mptcp_add_raddr,
++	.rem_raddr = mptcp_rem_raddr,
++	.init_subsocket_v4 = mptcp_init_subsocket_v4,
++	.init_subsocket_v6 = mptcp_init_subsocket_v6,
++	.delete_subflow = mptcp_delete_subflow,
++	.name = "netlink",
++	.owner = THIS_MODULE,
++};
++
++static int __init mptcp_netlink_register(void)
++{
++	int rc;
++
++	pr_debug("mptcp_netlink_register\n");
++
++	rc = genl_register_family(&mptcp_genl_family);
++	if (rc)
++		goto genl_family_fail;
++
++	rc = mptcp_register_path_manager(&netlink);
++	if (rc)
++		goto path_manager_fail;
++
++	pr_info("mptcp_netlink initialized with family=%d\n",
++			mptcp_genl_family.id);
++
++	return 0;
++
++path_manager_fail:
++	genl_unregister_family(&mptcp_genl_family);
++genl_family_fail:
++	return -1;
++}
++
++static void mptcp_netlink_unregister(void)
++{
++	pr_debug("mptcp_netlink_unregister\n");
++	mptcp_unregister_path_manager(&netlink);
++	genl_unregister_family(&mptcp_genl_family);
++}
++
++module_init(mptcp_netlink_register);
++module_exit(mptcp_netlink_unregister);
++
++MODULE_AUTHOR("Stephen Brennan");
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("MPTCP Dummy Netlink API");
++MODULE_VERSION("-1.1");
+-- 
+2.16.2
+
