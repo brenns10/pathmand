@@ -1,6 +1,7 @@
 /* pathmand - user-space path manager for MPTCP
  * Stephen Brennan <stephen@brennan.io>
  */
+#include <dlfcn.h>
 #include <stdio.h>
 
 #include <netlink/netlink.h>
@@ -14,10 +15,25 @@
 #include "mptcp_genl.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) /sizeof(x[0]))
+#define PM_NAMESIZ 32
+#define MAX_PMS 8
+
+struct path_manager {
+	void *handle;
+	char name[PM_NAMESIZ];
+	void (*new_connection)(void);
+	void (*new_addr)(void);
+	void (*join_attempt)(void);
+	void (*new_subflow)(void);
+	void (*subflow_closed)(void);
+	void (*conn_closed)(void);
+};
 
 struct pathmand {
 	struct nl_sock *notify_sk;
 	struct nl_sock *request_sk;
+	struct path_manager *pms[MAX_PMS];
+	unsigned int n_pms;
 };
 
 #define CMD(u, l) { \
@@ -107,10 +123,106 @@ int mptcp_conn_closed(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 	return NL_OK;
 }
 
+static void pathmand_destroy_pms(struct pathmand *pm)
+{
+	struct path_manager *mgr;
+
+	for (; pm->n_pms; pm->n_pms--) {
+		mgr = pm->pms[pm->n_pms - 1];
+
+		mgr->new_connection = NULL;
+		mgr->new_addr = NULL;
+		mgr->join_attempt = NULL;
+		mgr->new_subflow = NULL;
+		mgr->subflow_closed = NULL;
+		mgr->conn_closed = NULL;
+
+		dlclose(mgr->handle);
+		free(mgr);
+		pm->pms[pm->n_pms - 1] = NULL;
+	}
+}
+
+static void pathmand_destroy_nl(struct pathmand *pm)
+{
+	nl_close(pm->notify_sk);
+	nl_close(pm->request_sk);
+	nl_socket_free(pm->notify_sk);
+	nl_socket_free(pm->request_sk);
+}
+
+static int pathmand_init_pms(struct pathmand *pm, int argc, char **argv)
+{
+	int rc;
+	char buf[PM_NAMESIZ + 5];
+	struct path_manager *mgr;
+	pm->n_pms = 0;
+
+	if (argc - 1 > MAX_PMS) {
+		fprintf(stderr, "error: too many path managers\n");
+		return -1;
+	}
+
+	while (--argc) {
+		rc = snprintf(buf, sizeof(buf), "./%s.so", *++argv);
+		if (rc >= sizeof(buf) || rc < 0) {
+			fprintf(stderr, "error: path manager name \"%s\" "
+				"too long\n", *argv);
+			goto cleanup;
+		}
+
+		mgr = malloc(sizeof(*mgr));
+		if (!mgr) {
+			fprintf(stderr, "allocation error\n");
+			goto cleanup;
+		}
+
+		pm->pms[pm->n_pms++] = mgr;
+		strncpy(mgr->name, *argv, sizeof(mgr->name));
+
+		mgr->handle = dlopen(buf, RTLD_NOW);
+		if (!mgr->handle) {
+			fprintf(stderr, "dlopen: %s\n", dlerror());
+			goto free_then_cleanup;
+		}
+
+		/* let's not have repetitive code */
+		#define INIT_FUNC(func) do { \
+			mgr->func = dlsym(mgr->handle, #func); \
+			if (!mgr->func) { \
+				fprintf(stderr, "error finding symbol \"%s\"" \
+					": %s\n", #func, dlerror()); \
+				goto close_then_cleanup; \
+			} \
+		} while (0)
+
+		INIT_FUNC(new_connection);
+		INIT_FUNC(new_addr);
+		INIT_FUNC(join_attempt);
+		INIT_FUNC(new_subflow);
+		INIT_FUNC(subflow_closed);
+		INIT_FUNC(conn_closed);
+
+		#undef INIT_FUNC
+
+		printf("registered path manager \"%s\"\n", mgr->name);
+	}
+
+	return 0;
+close_then_cleanup:
+	dlclose(mgr->handle);
+free_then_cleanup:
+	free(mgr);
+	pm->n_pms--;
+cleanup:
+	pathmand_destroy_pms(pm);
+	return -1;
+}
+
 /* Initialize the path manager daemon. This initializes our netlink sockets and
  * callbacks.
  */
-static int pathmand_init(struct pathmand *pm)
+static int pathmand_init_nl(struct pathmand *pm)
 {
 	int rc = 0;
 	int i, group;
@@ -195,6 +307,22 @@ err_return:
 	return -1;
 }
 
+static int pathmand_init(struct pathmand *pm, int argc, char **argv)
+{
+	int rc;
+
+	rc = pathmand_init_pms(pm, argc, argv);
+	if (rc != 0)
+		return rc;
+
+	rc = pathmand_init_nl(pm);
+	if (rc != 0) {
+		pathmand_destroy_pms(pm);
+		return rc;
+	}
+	return 0;
+}
+
 /* Run the path manager daemon indefinitely...
  */
 static void pathmand_run(struct pathmand *pm)
@@ -211,8 +339,8 @@ static void pathmand_run(struct pathmand *pm)
 /* Destroy the resources held by the path manager daemon. */
 static void pathmand_destroy(struct pathmand *pm)
 {
-	nl_socket_free(pm->notify_sk);
-	nl_socket_free(pm->request_sk);
+	pathmand_destroy_pms(pm);
+	pathmand_destroy_nl(pm);
 }
 
 int main(int argc, char **argv)
@@ -220,7 +348,7 @@ int main(int argc, char **argv)
 	struct pathmand pm;
 	int rc;
 
-	rc = pathmand_init(&pm);
+	rc = pathmand_init(&pm, argc, argv);
 	if (rc != 0)
 		return rc;
 
