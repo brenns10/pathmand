@@ -21,6 +21,8 @@
 struct path_manager {
 	void *handle;
 	char name[PM_NAMESIZ];
+	void (*init_path_manager)(void);
+	void (*exit_path_manager)(void);
 	void (*new_connection)(void);
 	void (*new_addr)(void);
 	void (*join_attempt)(void);
@@ -78,19 +80,56 @@ static char *mptcp_groups[] = {
 	"conn_closed",
 };
 
+struct path_manager *choose_path_manager(struct pathmand *pmd)
+{
+	/* This function will eventually take (a) the connection id, and (b) the
+	 * connection info. It will implement policy for selecting a path
+	 * manager, and then store the path manager selection in a hash table
+	 * by the connection ID.
+	 */
+	if (pmd->n_pms <= 0)
+		return NULL;
+	else {
+		return &pmd->pms[0];
+	}
+}
+
+struct path_manager *get_path_manager(struct pathmand *pmd)
+{
+	/* This function will eventually do a hash table lookup on the
+	 * connection ID, returning the already mapped path manager. Right now
+	 * it just uses the same logic as choose_path_manager().
+	 */
+	return choose_path_manager(pmd);
+}
+
 /* Callback functions
  */
 
 int mptcp_new_connection(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
-	printf("new_connection()\n");
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = choose_path_manager(pmd);
+	if (mgr) {
+		mgr->new_connection();
+	} else {
+		printf("unhandled new_connection()\n");
+	}
 	return NL_OK;
 }
 
 int mptcp_new_addr(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = choose_path_manager(pmd);
+	if (mgr) {
+		mgr->new_addr();
+	} else {
+		printf("unhandled new_addr()\n");
+	}
+	return NL_OK;
 	printf("new_addr()\n");
 	return NL_OK;
 }
@@ -98,6 +137,14 @@ int mptcp_new_addr(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 int mptcp_join_attempt(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = get_path_manager(pmd);
+	if (mgr) {
+		mgr->join_attempt();
+	} else {
+		printf("unhandled join_attempt()\n");
+	}
+	return NL_OK;
 	printf("join_attempt()\n");
 	return NL_OK;
 }
@@ -105,21 +152,39 @@ int mptcp_join_attempt(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 int mptcp_new_subflow(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
-	printf("new_subflow()\n");
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = get_path_manager(pmd);
+	if (mgr) {
+		mgr->new_subflow();
+	} else {
+		printf("unhandled new_subflow()\n");
+	}
 	return NL_OK;
 }
 
 int mptcp_subflow_closed(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
-	printf("subflow_closed()\n");
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = get_path_manager(pmd);
+	if (mgr) {
+		mgr->subflow_closed();
+	} else {
+		printf("unhandled subflow_closed()\n");
+	}
 	return NL_OK;
 }
 
 int mptcp_conn_closed(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
-	printf("conn_closed()\n");
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = get_path_manager(pmd);
+	if (mgr) {
+		mgr->conn_closed();
+	} else {
+		printf("unhandled conn_closed()\n");
+	}
 	return NL_OK;
 }
 
@@ -130,6 +195,10 @@ static void pathmand_destroy_pms(struct pathmand *pm)
 	for (; pm->n_pms; pm->n_pms--) {
 		mgr = &pm->pms[pm->n_pms - 1];
 
+		mgr->exit_path_manager();
+
+		mgr->init_path_manager = NULL;
+		mgr->exit_path_manager = NULL;
 		mgr->new_connection = NULL;
 		mgr->new_addr = NULL;
 		mgr->join_attempt = NULL;
@@ -177,7 +246,7 @@ static int pathmand_init_pms(struct pathmand *pm, int argc, char **argv)
 			goto cleanup;
 		}
 
-		mgr = &pm->pms[pm->n_pms + 1];
+		mgr = &pm->pms[pm->n_pms];
 		strncpy(mgr->name, *argv, sizeof(mgr->name));
 
 		mgr->handle = dlopen(buf, RTLD_NOW);
@@ -198,6 +267,8 @@ static int pathmand_init_pms(struct pathmand *pm, int argc, char **argv)
 			} \
 		} while (0)
 
+		INIT_FUNC(init_path_manager);
+		INIT_FUNC(exit_path_manager);
 		INIT_FUNC(new_connection);
 		INIT_FUNC(new_addr);
 		INIT_FUNC(join_attempt);
@@ -205,9 +276,10 @@ static int pathmand_init_pms(struct pathmand *pm, int argc, char **argv)
 		INIT_FUNC(subflow_closed);
 		INIT_FUNC(conn_closed);
 
+
 		#undef INIT_FUNC
 
-		printf("registered path manager \"%s\"\n", mgr->name);
+		mgr->init_path_manager();
 	}
 
 	return 0;
@@ -259,7 +331,7 @@ static int pathmand_init_nl(struct pathmand *pm)
 	if (rc != 0) {
 		nl_perror(rc, "genl_ops_resolve");
 	}
-	printf("genl family: %x\n", mptcp_family.o_id);
+	printf("resolve family mptcp = 0x%x\n", mptcp_family.o_id);
 
 	/* register genl family so genl_handle_msg will call us */
 	rc = genl_register_family(&mptcp_family);
@@ -284,7 +356,7 @@ static int pathmand_init_nl(struct pathmand *pm)
 			nl_perror(group, mptcp_groups[i]);
 			goto err_cleanup_request_sk;
 		}
-		printf("resolve %s.%s = %d\n", mptcp_family.o_name,
+		printf("resolve group %s.%s = 0x%x\n", mptcp_family.o_name,
 			mptcp_groups[i], group);
 
 		rc = nl_socket_add_memberships(
