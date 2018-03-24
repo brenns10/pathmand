@@ -12,6 +12,9 @@
 #include <netlink/genl/ctrl.h>
 #include <netlink/genl/mngt.h>
 
+/* In a final implementation we would include this: */
+/* #include <linux/mptcp.h> */
+/* Rather than this: */
 #include "mptcp_genl.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) /sizeof(x[0]))
@@ -23,12 +26,17 @@ struct path_manager {
 	char name[PM_NAMESIZ];
 	void (*init_path_manager)(void);
 	void (*exit_path_manager)(void);
-	void (*new_connection)(void);
-	void (*new_addr)(void);
-	void (*join_attempt)(void);
-	void (*new_subflow)(void);
-	void (*subflow_closed)(void);
-	void (*conn_closed)(void);
+
+	void (*created)(void);
+	void (*established)(void);
+	void (*closed)(void);
+	void (*announced)(void);
+	void (*removed)(void);
+	void (*sub_created)(void);
+	void (*sub_established)(void);
+	void (*sub_closed)(void);
+	void (*sub_priority)(void);
+	void (*sub_error)(void);
 };
 
 struct pathmand {
@@ -38,46 +46,68 @@ struct pathmand {
 	unsigned int n_pms;
 };
 
-#define CMD(u, l) { \
-	.c_id = MPTCP_C_ ## u, \
+static struct nla_policy mptcp_genl_policy[MPTCP_ATTR_MAX + 1] = {
+	[MPTCP_ATTR_TOKEN]	= { .type	= NLA_U32,	},
+	[MPTCP_ATTR_FAMILY]	= { .type	= NLA_U16,	},
+	[MPTCP_ATTR_LOC_ID]	= { .type	= NLA_U8,	},
+	[MPTCP_ATTR_REM_ID]	= { .type	= NLA_U8,	},
+	[MPTCP_ATTR_SADDR4]	= { .type	= NLA_U32,	},
+	[MPTCP_ATTR_SADDR6]	= { .type	= NLA_BINARY,
+				    .maxlen	= sizeof(struct in6_addr), },
+	[MPTCP_ATTR_DADDR4]	= { .type	= NLA_U32,	},
+	[MPTCP_ATTR_DADDR6]	= { .type	= NLA_BINARY,
+				    .maxlen	= sizeof(struct in6_addr), },
+	[MPTCP_ATTR_SPORT]	= { .type	= NLA_U16,	},
+	[MPTCP_ATTR_DPORT]	= { .type	= NLA_U16,	},
+	[MPTCP_ATTR_BACKUP]	= { .type	= NLA_U8,	},
+	[MPTCP_ATTR_TIMEOUT]	= { .type	= NLA_U32,	},
+	[MPTCP_ATTR_IF_IDX]	= { .type	= NLA_S32,	},
+};
+
+#define EVENT(u, l) { \
+	.c_id = MPTCP_EVENT_ ## u, \
 	.c_name = #l, \
-	.c_maxattr = MPTCP_A_MAX, \
+	.c_maxattr = MPTCP_ATTR_MAX, \
 	.c_attr_policy = mptcp_genl_policy, \
-	.c_msg_parser = mptcp_ ## l, \
+	.c_msg_parser = event_ ## l, \
 }
 
 /* forward declare commands */
-int mptcp_new_connection(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
-int mptcp_new_addr(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
-int mptcp_join_attempt(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
-int mptcp_new_subflow(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
-int mptcp_subflow_closed(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
-int mptcp_conn_closed(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_created(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_established(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_closed(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_announced(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_removed(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_sub_created(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_sub_established(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_sub_closed(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_sub_priority(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
+static int event_sub_error(struct nl_cache_ops *, struct genl_cmd *, struct genl_info *, void *);
 
-/* Only declare commands we are prepared to handle. */
+/* Only declare events we are prepared to handle. */
 static struct genl_cmd mptcp_genl_cmds[] = {
-	CMD(NEW_CONNECTION, new_connection),
-	CMD(NEW_ADDR, new_addr),
-	CMD(JOIN_ATTEMPT, join_attempt),
-	CMD(NEW_SUBFLOW, new_subflow),
-	CMD(SUBFLOW_CLOSED, subflow_closed),
-	CMD(CONN_CLOSED, conn_closed),
+	EVENT(CREATED, created),
+	EVENT(ESTABLISHED, established),
+	EVENT(CLOSED, closed),
+	EVENT(ANNOUNCED, announced),
+	EVENT(REMOVED, removed),
+	EVENT(SUB_CREATED, sub_created),
+	EVENT(SUB_ESTABLISHED, sub_established),
+	EVENT(SUB_CLOSED, sub_closed),
+	EVENT(SUB_PRIORITY, sub_priority),
+	EVENT(SUB_ERROR, sub_error),
 };
 
 static struct genl_ops mptcp_family = {
 	.o_hdrsize = 0,
-	.o_name = "mptcp",
+	.o_name = MPTCP_GENL_NAME,
 	.o_cmds = mptcp_genl_cmds,
 	.o_ncmds = ARRAY_SIZE(mptcp_genl_cmds),
 };
 
 static char *mptcp_groups[] = {
-	"new_connection",
-	"new_addr",
-	"join_attempt",
-	"new_subflow",
-	"subflow_closed",
-	"conn_closed",
+	MPTCP_GENL_EV_GRP_NAME,
+	MPTCP_GENL_CMD_GRP_NAME,
 };
 
 struct path_manager *choose_path_manager(struct pathmand *pmd)
@@ -106,84 +136,132 @@ struct path_manager *get_path_manager(struct pathmand *pmd)
 /* Callback functions
  */
 
-int mptcp_new_connection(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+int event_created(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
 	struct pathmand *pmd = void_pm;
 	struct path_manager *mgr = choose_path_manager(pmd);
 	if (mgr) {
-		mgr->new_connection();
+		/* handle */
 	} else {
 		printf("unhandled new_connection()\n");
 	}
 	return NL_OK;
 }
 
-int mptcp_new_addr(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+int event_established(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
 	struct pathmand *pmd = void_pm;
 	struct path_manager *mgr = choose_path_manager(pmd);
 	if (mgr) {
-		mgr->new_addr();
+		/* handle */
 	} else {
-		printf("unhandled new_addr()\n");
+		printf("unhandled established()\n");
 	}
-	return NL_OK;
-	printf("new_addr()\n");
 	return NL_OK;
 }
 
-int mptcp_join_attempt(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+int event_closed(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
 	struct pathmand *pmd = void_pm;
 	struct path_manager *mgr = get_path_manager(pmd);
 	if (mgr) {
-		mgr->join_attempt();
+		/* handle */
 	} else {
-		printf("unhandled join_attempt()\n");
+		printf("unhandled closed()\n");
 	}
-	return NL_OK;
-	printf("join_attempt()\n");
 	return NL_OK;
 }
 
-int mptcp_new_subflow(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+int event_announced(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
 	struct pathmand *pmd = void_pm;
 	struct path_manager *mgr = get_path_manager(pmd);
 	if (mgr) {
-		mgr->new_subflow();
+		/* handle */
 	} else {
-		printf("unhandled new_subflow()\n");
+		printf("unhandled announced()\n");
 	}
 	return NL_OK;
 }
 
-int mptcp_subflow_closed(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+int event_removed(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
 	struct pathmand *pmd = void_pm;
 	struct path_manager *mgr = get_path_manager(pmd);
 	if (mgr) {
-		mgr->subflow_closed();
+		/* handle */
 	} else {
-		printf("unhandled subflow_closed()\n");
+		printf("unhandled removed()\n");
 	}
 	return NL_OK;
 }
 
-int mptcp_conn_closed(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+int event_sub_created(struct nl_cache_ops *ops, struct genl_cmd *cmd,
 		struct genl_info *info, void *void_pm)
 {
 	struct pathmand *pmd = void_pm;
 	struct path_manager *mgr = get_path_manager(pmd);
 	if (mgr) {
-		mgr->conn_closed();
+		/* handle */
 	} else {
-		printf("unhandled conn_closed()\n");
+		printf("unhandled sub_created()\n");
+	}
+	return NL_OK;
+}
+
+static int event_sub_established(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+		struct genl_info *info, void *void_pm)
+{
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = get_path_manager(pmd);
+	if (mgr) {
+		/* handle */
+	} else {
+		printf("unhandled sub_established()\n");
+	}
+	return NL_OK;
+}
+
+static int event_sub_closed(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+		struct genl_info *info, void *void_pm)
+{
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = get_path_manager(pmd);
+	if (mgr) {
+		/* handle */
+	} else {
+		printf("unhandled sub_closed()\n");
+	}
+	return NL_OK;
+}
+
+static int event_sub_priority(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+		struct genl_info *info, void *void_pm)
+{
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = get_path_manager(pmd);
+	if (mgr) {
+		/* handle */
+	} else {
+		printf("unhandled sub_priority()\n");
+	}
+	return NL_OK;
+}
+
+static int event_sub_error(struct nl_cache_ops *ops, struct genl_cmd *cmd,
+		struct genl_info *info, void *void_pm)
+{
+	struct pathmand *pmd = void_pm;
+	struct path_manager *mgr = get_path_manager(pmd);
+	if (mgr) {
+		/* handle */
+	} else {
+		printf("unhandled sub_error()\n");
 	}
 	return NL_OK;
 }
@@ -199,12 +277,17 @@ static void pathmand_destroy_pms(struct pathmand *pm)
 
 		mgr->init_path_manager = NULL;
 		mgr->exit_path_manager = NULL;
-		mgr->new_connection = NULL;
-		mgr->new_addr = NULL;
-		mgr->join_attempt = NULL;
-		mgr->new_subflow = NULL;
-		mgr->subflow_closed = NULL;
-		mgr->conn_closed = NULL;
+
+		mgr->created = NULL;
+		mgr->established = NULL;
+		mgr->closed = NULL;
+		mgr->announced = NULL;
+		mgr->removed = NULL;
+		mgr->sub_created = NULL;
+		mgr->sub_established = NULL;
+		mgr->sub_closed = NULL;
+		mgr->sub_priority = NULL;
+		mgr->sub_error = NULL;
 
 		dlclose(mgr->handle);
 	}
@@ -269,12 +352,17 @@ static int pathmand_init_pms(struct pathmand *pm, int argc, char **argv)
 
 		INIT_FUNC(init_path_manager);
 		INIT_FUNC(exit_path_manager);
-		INIT_FUNC(new_connection);
-		INIT_FUNC(new_addr);
-		INIT_FUNC(join_attempt);
-		INIT_FUNC(new_subflow);
-		INIT_FUNC(subflow_closed);
-		INIT_FUNC(conn_closed);
+
+		INIT_FUNC(created);
+		INIT_FUNC(established);
+		INIT_FUNC(closed);
+		INIT_FUNC(announced);
+		INIT_FUNC(removed);
+		INIT_FUNC(sub_created);
+		INIT_FUNC(sub_established);
+		INIT_FUNC(sub_closed);
+		INIT_FUNC(sub_priority);
+		INIT_FUNC(sub_error);
 
 
 		#undef INIT_FUNC

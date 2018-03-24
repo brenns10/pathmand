@@ -3,34 +3,54 @@
  */
 #include <stdio.h>
 
-void new_connection(void)
+void created(void)
 {
-	printf("new_connection\n");
+	printf("created\n");
 }
 
-void new_addr(void)
+void established(void)
 {
-	printf("new_addr\n");
+	printf("established\n");
 }
 
-void join_attempt(void)
+void closed(void)
 {
-	printf("join_attempt\n");
+	printf("closed\n");
 }
 
-void new_subflow(void)
+void announced(void)
 {
-	printf("new_subflow\n");
+	printf("announced\n");
 }
 
-void subflow_closed(void)
+void removed(void)
 {
-	printf("subflow_closed\n");
+	printf("removed\n");
 }
 
-void conn_closed(void)
+void sub_created(void)
 {
-	printf("conn_closed\n");
+	printf("sub_created\n");
+}
+
+void sub_established(void)
+{
+	printf("sub_established\n");
+}
+
+void sub_closed(void)
+{
+	printf("sub_closed\n");
+}
+
+void sub_priority(void)
+{
+	printf("sub_priority\n");
+}
+
+void sub_error(void)
+{
+	printf("sub_error\n");
 }
 
 void init_path_manager(void)
